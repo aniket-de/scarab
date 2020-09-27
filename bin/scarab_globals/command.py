@@ -25,37 +25,18 @@ import time
 from enum import Enum
 import shlex
 
-class SubmissionSystems(Enum):
-  LOCAL = 0
-  PBS = 1
-  SBATCH = 2
+"""
+This file declares a wrapper class for arbitrary Bash Commands. It is meant to be the interface between
+python and Bash. Ultimately, all commands run directly in the shell are passed through here.
+"""
 
-class LocalConfig:
-  num_threads = None
-
-class PBSConfig:
-  PBS_args ="-V -l nodes=1:ppn=5"
-
-def generate(submission_system, cmd_str, run_dir=None, results_dir=os.getcwd(), stdout=None, stderr=None):
-  if submission_system == SubmissionSystems.LOCAL:
-    cmd =    Command(cmd_str, run_dir=run_dir, results_dir=results_dir, stdout=stdout, stderr=stderr)
-  elif submission_system == SubmissionSystems.PBS:
-    cmd = PBSCommand(cmd_str, run_dir=run_dir, results_dir=results_dir, stdout=stdout, stderr=stderr)
-  else:
-    assert False, "Error: Attempting to generate command for unknown submission system: {}".format(submission_system)
-  return cmd
-
-def launch(submission_system, cmd_list):
-  executor = JobPoolExecutor(cmd_list)
-  if submission_system == SubmissionSystems.LOCAL:
-    executor.run_parallel_commands(num_threads=LocalConfig.num_threads)
-  elif submission_system == SubmissionSystems.PBS:
-    executor.run_serial_commands()
-  else:
-    assert False, "Error: Attempting to generate command for unknown submission system"
+class CommandDefaults:
+  walltime          = None # Ammount of time to run process before killing it
+  memory_per_core   = None # Expected memory required by process
+  cores             = None # Expected number of cores required by process
 
 class Command:
-  def __init__(self, cmd_str, run_dir=None, results_dir=os.getcwd(), stdout=None, stderr=None, stdout_fp=None, stderr_fp=None):
+  def __init__(self, cmd_str, name=None, run_dir=None, results_dir=os.getcwd(), stdout=None, stderr=None, stdout_fp=None, stderr_fp=None):
     self.stdout      = stdout
     self.stderr      = stderr
     self.stdout_fp   = stdout_fp
@@ -64,18 +45,28 @@ class Command:
     self.results_dir = os.path.abspath(results_dir)
     self.cmd         = cmd_str
     self.process     = None
+    self.name        = name
+    self.snapshot_log = None
+
+    # Batch Variables
+    self.walltime        = CommandDefaults.walltime
+    self.memory_per_core = CommandDefaults.memory_per_core
+    self.cores           = CommandDefaults.cores
+
+    if self.stdout:
+      self.stdout = os.path.join(self.results_dir, self.stdout)
+    if self.stderr:
+      self.stderr = os.path.join(self.results_dir, self.stderr)
 
     if self.run_dir:
       self.run_dir     = os.path.abspath(run_dir)
 
   def __open_stdout(self):
     if self.stdout:
-      self.stdout = os.path.abspath(self.stdout)
       self.stdout_fp = open(self.stdout, "w")
 
   def __open_stderr(self):
     if self.stderr:
-      self.stderr = os.path.abspath(self.stderr)
       self.stderr_fp = open(self.stderr, "w")
 
   def __close_files(self):
@@ -100,6 +91,9 @@ class Command:
     if self.run_dir:
       os.chdir(self.run_dir)
 
+  def process_command_list(self):
+    return [ self ]
+
   def run(self):
     self.__prepare_to_run()
     self.returncode = subprocess.call(shlex.split(self.cmd), stdout=self.stdout_fp, stderr=self.stderr_fp)
@@ -116,7 +110,18 @@ class Command:
     f.write(self.cmd)
     f.write('\n')
 
-  def write_to_jobfile(self, jobfile_name="jobfile", jobfile_permissions=0o760, prefix=None):
+  def write_to_snapshot_log(self, job_id):
+    if self.snapshot_log:
+      with open(self.snapshot_log, "a+") as fp:
+        print("{job_id}\t{results_dir}".format(job_id=job_id, results_dir=self.results_dir),
+              file=fp)
+
+  def write_to_jobfile(self, jobfile_name="jobfile", jobfile_permissions=0o760, prefix=None, suffix=None):
+    if self.name:
+      jobfile_name = "{cmd_name}.{jobfile_name}".format(
+        cmd_name=self.name,
+        jobfile_name=jobfile_name
+      )
     self.jobfile_path = self.results_dir + "/" + jobfile_name
     f = open(self.jobfile_path, "w+")
 
@@ -124,13 +129,17 @@ class Command:
       f.write(prefix)
 
     self.append_to_jobfile(f)
+
+    if suffix:
+      f.write(suffix)
+
     f.close()
     os.chmod(self.jobfile_path, jobfile_permissions)
     return self.jobfile_path
 
   def poll(self):
     assert self.process, "Error: Cannot poll Command that has not been run!"
-    self.process.poll();
+    self.process.poll()
     self.returncode = self.process.returncode
 
   def wait(self):
@@ -149,33 +158,6 @@ class Command:
 
     if self.process.poll() is None:
       self.process.kill()
-
-class PBSCommand(Command):
-
-  def __str__(self):
-    return "PBS" + super().__str__()
-
-  def run(self, pbs_args=PBSConfig.PBS_args):
-    prefix = "source /export/software/anaconda3/bin/activate\n"
-    if self.run_dir:
-      prefix += "cd {}\n".format(self.run_dir)
-
-    self.write_to_jobfile(prefix=prefix)
-
-    self.pbs_cmd = "qsub " + pbs_args + \
-          " -o " + self.stdout +        \
-          " -e " + self.stderr +        \
-          " " + self.jobfile_path
-    
-    print(self.pbs_cmd)
-    proc = subprocess.Popen(shlex.split(self.pbs_cmd), stdout=subprocess.PIPE)
-    proc_out, proc_err = proc.communicate()
-
-    self.pbs_job_id = proc_out.rstrip().decode('utf-8');
-    print(self.pbs_job_id)
-
-    return self.pbs_job_id
-    
 
 class CommandTracker:
   """
@@ -213,32 +195,3 @@ class CommandTracker:
     time.sleep(1) # Delay to ensure processes have started before sending kill
     for proc in self.proc_list:
       proc.kill()
-
-class JobPoolExecutor:
-  """
-  Runs a Pool of Jobs on a Submission System.
-  """
-  def __init__(self, cmds):
-    self.cmds = cmds
-
-  def push(self, cmd):
-    self.cmds.append(cmd);
-
-  @staticmethod
-  def run_command(cmd):
-    returncode = cmd.run()
-    print("Finished command with return code: {}".format(returncode))
-    print(cmd)
-    return returncode
-
-  def run_serial_commands(self):
-    for cmd in self.cmds:
-      cmd.run()
-
-  def run_parallel_commands(self, num_threads=None):
-    """
-    If num_threads is None, Pool() uses number of cores in the system.
-    """
-    print("Starting Run Parallel Commands: num_cmds={}, num_threads={}".format(len(self.cmds), num_threads))
-    with multiprocessing.Pool(num_threads) as pool:
-      pool.map(JobPoolExecutor.run_command, self.cmds)

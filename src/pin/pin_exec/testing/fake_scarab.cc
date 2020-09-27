@@ -35,16 +35,28 @@ void Fake_Scarab::fetch_instructions(const std::vector<uint64_t>& addresses) {
 }
 
 void Fake_Scarab::fetch_instructions_in_wrongpath_nop_mode(
-  uint64_t next_fetch_addr, int num_instrucitons,
-  Wrongpath_Nop_Mode_Reason reason) {
-  for(int i = 0; i < num_instrucitons; ++i) {
+  uint64_t next_fetch_addr, int num_instructions,
+  Wrongpath_Nop_Mode_Reason expected_reason) {
+  for(int i = 0; i < num_instructions; ++i) {
     fetch_next_instruction();
     ASSERT_TRUE(CHECK_EQUAL_IN_HEX(fetched_ops_.back().instruction_addr,
                                    next_fetch_addr, "instruction address"));
     ASSERT_TRUE(fetched_ops_.back().fake_inst);
-    ASSERT_EQ(fetched_ops_.back().fake_inst_reason, reason);
+    ASSERT_EQ(fetched_ops_.back().fake_inst_reason, expected_reason);
 
     next_fetch_addr += 1;
+  }
+}
+
+void Fake_Scarab::fetch_retire_until_completion() {
+  while(!has_reached_end()) {
+    while(!has_reached_end() && fetched_ops_.size() < 1000) {
+      fetch_next_instruction();
+      if(has_fetched_ifetch_barrier()) {
+        break;
+      }
+    }
+    retire_all();
   }
 }
 
@@ -61,6 +73,20 @@ void Fake_Scarab::fetch_until_first_control_flow() {
   } while(fetched_ops_.back().cf_type == 0);
 }
 
+void Fake_Scarab::fetch_until_first_wrongpath_nop_mode(
+  int max_num_instructions, Wrongpath_Nop_Mode_Reason expected_reason) {
+  for(int i = 0; i < max_num_instructions; ++i) {
+    fetch_next_instruction();
+
+    if(fetched_ops_.back().fake_inst) {
+      ASSERT_EQ(fetched_ops_.back().fake_inst_reason, expected_reason);
+      return;
+    }
+  }
+
+  GTEST_FATAL_FAILURE_("Did not go to wrongpath nop mode");
+}
+
 uint64_t Fake_Scarab::get_latest_inst_uid() {
   if(fetched_ops_.empty()) {
     return std::numeric_limits<uint64_t>::max();
@@ -69,6 +95,9 @@ uint64_t Fake_Scarab::get_latest_inst_uid() {
   }
 }
 
+bool Fake_Scarab::has_fetched_ifetch_barrier() {
+  return !fetched_ops_.empty() && fetched_ops_.back().is_ifetch_barrier;
+}
 
 bool Fake_Scarab::has_reached_end() {
   if(op_buffer_.empty()) {
@@ -111,7 +140,6 @@ void Fake_Scarab::fetch_next_instruction() {
   fetched_ops_.push_back(op_buffer_.front());
   op_buffer_.pop_front();
 }
-
 
 void Fake_Scarab::flush_cops_after_uid(uint64_t inst_uid) {
   op_buffer_.clear();

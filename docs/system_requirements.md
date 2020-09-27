@@ -7,19 +7,20 @@ Other versions of the same software may work, but have not been tested.
 Scarab relies on the following software packages:
 
 ## Required Packages
-* Intel [PIN 3.5](https://software.intel.com/system/files/managed/23/50/pinplay-drdebug-3.5-pin-3.5-97503-gac534ca30-gcc-linux.tar.gz).
+* Intel [PIN 3.5](https://software.intel.com/en-us/articles/program-recordreplay-toolkit).
 * g++ 7.3.1
 * gcc 7.3.1
 * Clang 5.0.1
 * Python 3.6.3
 
 ## Required Python Packages
-* numpy
-* pandas
-* sphinx
+See `$SCARAB_ROOT/bin/requirements.txt`
 
 ##### E.g. Install with pip:
-> pip3 install numpy pandas sphinx
+```
+cd $SCARAB_ROOT/bin
+pip3 install -r requirements.txt
+```
 
 # Other Useful Packages
 
